@@ -307,7 +307,6 @@ def ProcessRBOrders():
                         account = sub_params['AccountID']
                         st = sub_params['serviceTemplateID']
                         subid = sub_params['subscriptionID']
-
                 else:
                     print "Error retrieving subscription data"
                     CleanUp()
