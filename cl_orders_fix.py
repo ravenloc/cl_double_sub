@@ -153,6 +153,7 @@ def restartOrder(order_id, target_status = None):
     try:
         sign = orderSignature(order_id)
     except xmlrpclib.Fault as e:
+        print "Failed to get signature:"
         print str(e)
         return -1
     try:
@@ -199,7 +200,7 @@ def complete_oiid_with_trigger(sub_id, oiid, aid, st_id):
     except:
         print "Could not remove subscription %s after triggering event" % sub_id
 
-def order_followup(order_id):
+def order_followup(order_id, target_status = None):
     sleep_time = 5
     cur.execute("""select s."Status", s."ServStatus", "subscriptionID", "OrderDocOrderID","serviceTemplateID","AccountID","OIID" from "OItem" oi join "Subscription" s using ("subscriptionID") where "OrderDocOrderID" = %s""",[order_id])
     data = cur.fetchall()
@@ -222,7 +223,7 @@ def order_followup(order_id):
                     conn.rollback()
                     CleanUp()
                     sys.exit(1)
-            if restartOrder(record['OrderDocOrderID']) == -1:
+            if restartOrder(record['OrderDocOrderID'], target_status) == -1:
                 print "Failed to restart order"
                 CleanUp()
                 exit(1)
@@ -233,21 +234,29 @@ def order_followup(order_id):
             if order_status == 'CP':
                 print "Order %s is completed" % (record['OrderDocOrderID'])
                 print "______________"
-                continue
+                return 0
             elif order_status == 'PF':
                 print "Order %s failed, will be checked with failed orders." % (record['OrderDocOrderID'])
                 print "______________"
-                continue
-            if subscr_check['status'] != 0 and "does not exist" in subscr_check['error_message']:
+                return 0
+            elif subscr_check['status'] != 0 and "does not exist" in subscr_check['error_message'] and order_status == 'PR':
                 print "Order was not completed. Will try to trigger event manually."
                 complete_oiid_with_trigger(record['subscriptionID'], record['OIID'], record['AccountID'], record['serviceTemplateID'])
                 print "Event triggered. Subscription removed from POA."
                 print "______________"
+                return 0
+            else:
+                if target_status == 'PD' and order_status == 'RB':
+                    print "Order %s dropped to CPC status will be checked in next block" % record['OrderDocOrderID']
+                    return 0
+                print "Status %s is unexpected for order %s under account %s or subscription was not removed in OA please chek manually" % (order_status, record['OrderDocOrderID'], record['AccountID'])
+                return -1
+
 
 def process_cnbs_orders():
-    print "Checking failed 'can not be stopped' CL Orders"
+    print "Checking failed 'can not be stopped'/'Service_timeout' CL Orders"
     print "______________"
-    cur.execute("""select distinct("subscriptionID"), "OrderDocOrderID", "OIID", s."Status", s."ServStatus", "ProcessingComment" from "OItem" io join "Subscription" s using("subscriptionID") where "OrderDocOrderID" in (select "OrderID" from "SalesOrder" where "OrderTypeID" = 'CF' and "OrderStatusID" in ('PF')) and "ProcessingComment" ~ 'Stopping service of Order Item'  and s."Status" != 60 and s."ServStatus" != 90""")
+    cur.execute("""select distinct("subscriptionID"), "OrderDocOrderID", "OIID", s."Status", s."ServStatus", "ProcessingComment" from "OItem" io join "Subscription" s using("subscriptionID") where "OrderDocOrderID" in (select "OrderID" from "SalesOrder" where "OrderTypeID" = 'CF' and "OrderStatusID" in ('PF')) and ("ProcessingComment" ~ 'Stopping service of Order Item' or "ProcessingComment"  ~ 'Service Creation Timeout Exceeded')  and s."Status" != 60 and s."ServStatus" != 90""")
     data = cur.fetchall()
     if len(data) > 0:
         for record in data:
@@ -272,16 +281,16 @@ def process_cnbs_orders():
                     print "______________"
                     continue
                 print "Subscription %s successfully removed from OA" % record['subscriptionID']
-                order_followup(record['OrderDocOrderID'])
+                order_followup(record['OrderDocOrderID'],'PD')
             else:
                 print "Order %s is failed despite subscription %s does not exist in OA will try resubmit and process it" % (record['OrderDocOrderID'], record['subscriptionID'])
-                order_followup(record['OrderDocOrderID'])
+                order_followup(record['OrderDocOrderID'], 'PD')
 
 
 def ProcessRBOrders():
     print "Checking CPC CL Orders"
     print "______________"
-    cur.execute("""select distinct("subscriptionID"), "OrderDocOrderID", "OIID", s."Status", s."ServStatus" from "OItem" io join "Subscription" s using("subscriptionID") where "OrderDocOrderID" in (select "OrderID" from "SalesOrder" where "OrderTypeID" = 'CF' and "OrderStatusID" in ('RB')) and s."Status" != 60 and s."ServStatus" != 90 """)
+    cur.execute("""select distinct("subscriptionID"), "OrderDocOrderID", "OIID", s."Status", s."ServStatus", s."AccountID", s."serviceTemplateID" from "OItem" io join "Subscription" s using("subscriptionID") where "OrderDocOrderID" in (select "OrderID" from "SalesOrder" where "OrderTypeID" = 'CF' and "OrderStatusID" in ('RB')) and s."Status" != 60 and s."ServStatus" != 90 """)
     data = cur.fetchall()
     if len(data) > 0:
         for record in data:
@@ -290,36 +299,21 @@ def ProcessRBOrders():
             #record['OIID']
             #record['Status']
             #record['ServStatus']
+            #record['AccountID']
+            #record['serviceTemplateID']
             subscription = getSubscription(record['subscriptionID'])
             if subscription['status'] != 0 and "does not exist" in subscription['error_message']:
                 print "Found order %s in checking provisioning coditions without subscription in OA when it is supposed to be." % (record['OrderDocOrderID'])
                 print "Adding subscription %s to operations for Order %s" % (record['subscriptionID'],record['OrderDocOrderID'])
-                cur.execute("""select "serviceTemplateID","AccountID", "subscriptionID" from "Subscription" where "subscriptionID" = %s """, [record['subscriptionID']])
-                sub_data = cur.fetchall()
-                account = ''
-                st = ''
-                subid = ''
-                if len(sub_data) > 0:
-                    for sub_params in sub_data:
-                        #sub_params['AccountID']
-                        #sub_params['serviceTemplateID']
-                        #sub_params['subscriptionID']
-                        account = sub_params['AccountID']
-                        st = sub_params['serviceTemplateID']
-                        subid = sub_params['subscriptionID']
-                else:
-                    print "Error retrieving subscription data"
-                    CleanUp()
-                    exit(1)
                 try:
-                    print "Creating subscription with parameters %s %s %s" % (account, st, subid)
-                    createSub(account, st, subid)
+                    print "Creating subscription with parameters %s %s %s" % (record['AccountID'], record['serviceTemplateID'], record['subscriptionID'])
+                    createSub(record['AccountID'], record['serviceTemplateID'], record['subscriptionID'])
                 except xmlrpclib.Fault as e:
                     print str(e)
                     CleanUp()
                     exit(1)
                 print "Restarting Order %s" % (record['OrderDocOrderID'])
-                order_followup(record['OrderDocOrderID'])
+                order_followup(record['OrderDocOrderID'], 'I4')
 
 
 def process_sdne_orders():
@@ -328,7 +322,7 @@ def process_sdne_orders():
 
 
 
-def main(sub_id):
+def main(order_id = None):
     InitScript()
     process_cnbs_orders()
     ProcessRBOrders()
@@ -336,4 +330,4 @@ def main(sub_id):
     CleanUp()
     
 if __name__ == "__main__":
-    main(sys.argv[0])
+    main()
