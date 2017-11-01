@@ -1,3 +1,49 @@
+from __future__ import print_function
+import re
+import hashlib
+import psycopg2
+import psycopg2.extras
+import ConfigParser
+import sys
+import xmlrpclib
+from collections import namedtuple
+from functools import partial
+
+class DBConnection(object):
+
+    def __init__(self, config):
+        """
+        Context manager managing connection to PostgreSQL
+        :param config: parsed config file
+        :type config: config.Config
+        """
+        self.database = config.database
+        self.user = config.user
+        self.password = config.password
+        self.db_host = config.db_host
+        self.port = config.port
+
+    def __enter__(self):
+        self.conn = psycopg2.connect(
+            database=self.database,
+            user=self.user,
+            password=self.password,
+            host=self.db_host,
+            port=self.port
+        )
+        self.cursor = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cursor.close()
+        self.conn.close()
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
 class Proxy(object):
     """
     Wrapper around xmlrpclib.ServerProxy with platform API methods
@@ -122,3 +168,96 @@ class BAapi(Proxy):
             #
             return False
         return self.api_call('TASKMAN','PostEvent',[ekid, params, 0])
+
+class OAapi(Proxy):
+    """
+    Class processing OA API requests
+    """
+    def add_sub(self, acc_id, st_id, sub_id=None):
+        """
+        Adding subscription on specified account within given service template without provisioning.
+        :param acc_id: Account subscription belongs to
+        :param st_id: Service template to use for creation
+        :param sub_id: Optional. Desired ID for subscription.
+        :return: dict
+        """
+        params = {
+            'account_id': int(acc_id),
+            'service_template_id': int(st_id),
+        }
+        if sub_id:
+            params['subscription_id'] = int(sub_id)
+
+        response = self.pem.addSubscription(params)
+
+        if response['status'] != 0:
+            #print("Subscription creation API failed: {}".format(res['error_message']), file=sys.stderr)
+            #LOGGER
+            #
+            return None
+        return response
+
+    def get_sub(self, subscription_id):
+        params = {
+            'subscription_id': int(subscription_id),
+            'get_resources': False
+        }
+        response = self.pem.getSubscription(params)
+        return response
+
+    def rm_sub(self, sub_id):
+        """
+        Removing subscription from OA
+        :param sub_id: subscription ID
+        :type sub_id: int, long
+        :return: dict
+        """
+        res = self.pem.removeSubscription({'subscription_id': int(sub_id)})
+
+        if res['status'] == 0:
+            return res
+
+
+Config = namedtuple('Config', [
+    'database',
+    'user',
+    'password',
+    'db_host',
+    'port',
+    'host_ip'
+])
+
+
+def config_from_file(path):
+    """
+    Parses config file and returns Config instance
+    :param path: full path to config file
+    :type path: str
+    :return: Config instance
+    :rtype: config.Config
+    """
+    with open(path, 'r') as f:
+        config = ConfigParser.ConfigParser()
+        config.readfp(f)
+
+        get_env_var = partial(config.get, 'environment')
+
+        database = get_env_var('DB_NAME')
+        user = get_env_var('DB_USER')
+        password = get_env_var('DB_PASSWD')
+        db_host = get_env_var('DB_HOST')
+        port = get_env_var('DB_PORT')
+        host_ip = get_env_var('HOST_IP')
+
+        return Config(database, user, password, db_host, port, host_ip)
+
+def get_poa_api_address(cursor):
+    query = 'SELECT "PEMAddress", "PEMPort" FROM "PEMOptions"'
+    cursor.execute(query)
+    result = None
+
+    for record in cursor.fetchall():
+        ip_addr = ''.join(record['PEMAddress'].split())
+        port = str(record['PEMPort'])
+        result = 'http://{}:{}'.format(ip_addr, port)
+    return result
