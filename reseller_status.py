@@ -2,6 +2,7 @@ import sys
 import psycopg2
 import psycopg2.extras
 import ConfigParser
+import datetime
 import csv
 from collections import namedtuple
 from functools import partial
@@ -85,7 +86,7 @@ class DBConnection(object):
         self.conn.rollback()
 
 def collect_data(db_conn):
-    query = """select "AccountID", "VendorAccountID", "AStatus", "CompanyName", "DateArc" from "Account" where "Type" = 2  and "AStatus" in (10,11,12) and "VendorAccountID" <> 1"""
+    query = """select a."AccountID", a."ClassID", c."Name", a."VendorAccountID", a."AStatus", a."CompanyName", a."DateArc" from "Account" a join "CustomerClass" c using ("ClassID") where "Type" = 2  and "AStatus" in (10,11,12) and "VendorAccountID" <> 1"""
     arc_query = """select "AccountID", "AStatus", "CompanyName", "DateArc" from "Account" where "AccountID" = {} union select "AccountID", "AStatus", "CompanyName", "DateArc" from "AccountArc" where "AccountID" = {}  order by "DateArc" desc  """
 
     accounts = db_conn.exec_query(query)
@@ -98,7 +99,7 @@ def collect_data(db_conn):
         days_on_hold = time() - arc_accounts[i-1]['DateArc']
         days_on_hold = days_on_hold / 86400.0
         #days_on_hold = ctime(float(arc_accounts[i-1]['DateArc']))
-        result_accounts.append((account['VendorAccountID'], account['AccountID'],account['CompanyName'],days_on_hold))
+        result_accounts.append((account['VendorAccountID'], account['AccountID'],account['ClassID'],account['Name'],account['CompanyName'],days_on_hold))
     return result_accounts
 
 def list_to_csv(filename, headers, data):
@@ -114,7 +115,7 @@ def main():
     outfile = 'account_days_on_hold.csv'
     with DBConnection(config) as db_conn:
         accounts = collect_data(db_conn)
-        list_to_csv(outfile,['L1','L2','Company Name', 'Days on hold'],accounts)
+        list_to_csv(outfile,['L1','L2','ClassID','Class Name','Company Name', 'Days on hold'],accounts)
 
 if __name__ == "__main__":
     main()
